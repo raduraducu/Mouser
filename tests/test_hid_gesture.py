@@ -496,6 +496,96 @@ class HidRequestTransportFailureTests(unittest.TestCase):
         self.assertEqual(listener._consecutive_request_timeouts, 1)
 
 
+class HidRequestReplyMatchingTests(unittest.TestCase):
+    """Frames captured from an MX Master 4 on slot 2 of a Bolt receiver,
+    with the software id rewritten to MY_SW. An IRoot lookup for REPROG_V4
+    is `_request(0x00, 0, [0x1B, 0x04, 0x00])`."""
+
+    # Reply from slot 2: REPROG_V4 is at feature index 0x0D. A sleeping
+    # mouse sends it 550-840 ms after the request.
+    SLOT_2_REPLY = [0x11, 0x02, 0x00, 0x0A, 0x0D] + [0x00] * 15
+    # The receiver rejecting the same request for empty slot 1, ~8 ms after
+    # it: HID++ 1.0 error 0x8F echoing sub-id 0x00 and address 0x0A.
+    SLOT_1_REJECTION = [0x10, 0x01, 0x8F, 0x00, 0x0A, 0x09, 0x00]
+
+    @staticmethod
+    def _rx_returning(*frames):
+        pending = list(frames)
+        return lambda timeout_ms=2000: pending.pop(0) if pending else None
+
+    def _request(self, listener, frames, timeout_ms=50):
+        with (
+            patch.object(listener, "_tx"),
+            patch.object(listener, "_rx", side_effect=self._rx_returning(*frames)),
+            patch.object(listener, "_on_report") as on_report,
+            patch("builtins.print"),
+        ):
+            result = listener._request(0x00, 0, [0x1B, 0x04, 0x00],
+                                       timeout_ms=timeout_ms)
+        return result, on_report
+
+    def test_accepts_a_reply_from_the_slot_it_asked(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._dev_idx = 0x02
+
+        result, _ = self._request(listener, [self.SLOT_2_REPLY])
+
+        self.assertEqual(result[0], 0x02)
+        self.assertEqual(result[4][0], 0x0D)
+
+    def test_ignores_a_late_reply_from_another_slot(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._dev_idx = 0x03
+
+        result, on_report = self._request(listener, [self.SLOT_2_REPLY])
+
+        self.assertIsNone(result)
+        on_report.assert_called_once_with(self.SLOT_2_REPLY)
+
+    def test_accepts_a_direct_device_answering_as_index_zero(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._dev_idx = hid_gesture.BT_DEV_IDX
+        reply = [0x11, 0x00] + self.SLOT_2_REPLY[2:]
+
+        result, _ = self._request(listener, [reply])
+
+        self.assertIsNotNone(result)
+
+    def test_a_receiver_rejection_fails_the_request_without_waiting(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._dev_idx = 0x01
+        start = time.monotonic()
+
+        result, _ = self._request(listener, [self.SLOT_1_REJECTION],
+                                  timeout_ms=2000)
+
+        self.assertIsNone(result)
+        self.assertLess(time.monotonic() - start, 0.5)
+        # Still counts towards the reconnect threshold: mid-session, a
+        # rejection means the device has gone.
+        self.assertEqual(listener._consecutive_request_timeouts, 1)
+
+    def test_a_rejection_for_another_slot_does_not_end_the_request(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._dev_idx = 0x02
+
+        result, _ = self._request(
+            listener, [self.SLOT_1_REJECTION, self.SLOT_2_REPLY])
+
+        self.assertIsNotNone(result)
+
+    def test_a_rejection_of_a_different_request_does_not_end_this_one(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._dev_idx = 0x01
+        other_request = self.SLOT_1_REJECTION[:4] + [0x1A] + [0x09, 0x00]
+
+        start = time.monotonic()
+        result, _ = self._request(listener, [other_request], timeout_ms=200)
+
+        self.assertIsNone(result)
+        self.assertGreaterEqual(time.monotonic() - start, 0.2)
+
+
 class HidBoltReceiverTests(unittest.TestCase):
     """Tests for Logi Bolt receiver support."""
 
@@ -543,6 +633,120 @@ class HidBoltReceiverTests(unittest.TestCase):
         ):
             self.assertTrue(listener._try_connect())
             self.assertEqual(divert_call_count[0], 2)
+
+    def _probe_timeouts(self, info):
+        """Run discovery against one candidate that has no REPROG_V4 and
+        return the timeout each slot probe was given."""
+        listener = hid_gesture.HidGestureListener()
+        timeouts = []
+
+        def fake_find_feature(feature_id, *, timeout_ms=None):
+            if feature_id == hid_gesture.FEAT_REPROG_V4:
+                timeouts.append(timeout_ms)
+            return None
+
+        with (
+            patch.object(listener, "_vendor_hid_infos", return_value=[info]),
+            patch.object(listener, "_find_feature", side_effect=fake_find_feature),
+            patch.object(hid_gesture, "HIDAPI_OK", True),
+            patch.object(hid_gesture, "_BACKEND_PREFERENCE", "hidapi"),
+            patch.object(hid_gesture, "_HID_API_STYLE", "hidapi"),
+            patch.object(
+                hid_gesture,
+                "_hid",
+                SimpleNamespace(device=_FakeHidDevice),
+                create=True,
+            ),
+            patch("core.hid_gesture._load_last_device_cache", return_value=None),
+            patch("builtins.print"),
+        ):
+            listener._try_connect()
+        return timeouts
+
+    def test_receiver_slot_probes_wait_long_enough_for_a_sleeping_device(self):
+        """A sleeping MX Master 4 answers its first request 550-840 ms late,
+        and the receiver rejects an empty slot at once, so a receiver slot
+        can afford to wait."""
+        timeouts = self._probe_timeouts({
+            "product_id": 0xC548, "usage_page": 0xFF00, "usage": 0x0002,
+            "source": "hidapi-enumerate", "product_string": "USB Receiver",
+            "path": b"/dev/hidraw-test",
+        })
+
+        self.assertEqual(len(timeouts), 6)
+        self.assertTrue(all(t >= 1500 for t in timeouts), timeouts)
+
+    def test_direct_device_probes_keep_the_short_timeout(self):
+        """Nothing rejects a wrong index on a direct device -- an MX Brio
+        never answers at all -- so each probe there costs its full wait."""
+        timeouts = self._probe_timeouts({
+            "product_id": 0x0944, "usage_page": 0xFF00, "usage": 0x0001,
+            "source": "hidapi-enumerate", "product_string": "MX Brio",
+            "path": b"/dev/hidraw-test",
+        })
+
+        self.assertEqual(len(timeouts), 7)
+        self.assertTrue(all(t == 400 for t in timeouts), timeouts)
+
+    def test_a_late_reply_does_not_settle_discovery_on_the_next_slot(self):
+        """End to end through `_request`: the mouse on slot 2 answers only
+        once slot 3 is being probed, and every other slot is empty."""
+        listener = hid_gesture.HidGestureListener()
+        info = {
+            "product_id": 0xC548, "usage_page": 0xFF00, "usage": 0x0002,
+            "source": "hidapi-enumerate", "product_string": "USB Receiver",
+            "path": b"/dev/hidraw-test",
+        }
+        clock = [1000.0]
+
+        class SlowMouseReceiver(_FakeHidDevice):
+            def __init__(self):
+                super().__init__()
+                self.queue = []
+                self.late_reply = None
+
+            def write(self, buf):
+                slot = buf[1]
+                if self.late_reply is not None:
+                    self.queue.append(self.late_reply)
+                    self.late_reply = None
+                if slot == 0x02:
+                    self.late_reply = HidRequestReplyMatchingTests.SLOT_2_REPLY
+                else:
+                    self.queue.append(
+                        [0x10, slot, 0x8F, buf[2], buf[3], 0x09, 0x00])
+
+            def read(self, size, timeout_ms=0):
+                if self.queue:
+                    return self.queue.pop(0)
+                clock[0] += (timeout_ms or 0) / 1000.0
+                return None
+
+        fake_time = SimpleNamespace(
+            time=lambda: clock[0], monotonic=time.monotonic, sleep=time.sleep)
+
+        with (
+            patch.object(listener, "_vendor_hid_infos", return_value=[info]),
+            patch.object(listener, "_query_device_name", return_value=None),
+            patch.object(listener, "_discover_reprog_controls", return_value=[]),
+            patch.object(listener, "_divert", return_value=True),
+            patch.object(listener, "_divert_extras"),
+            patch.object(hid_gesture, "time", fake_time),
+            patch.object(hid_gesture, "HIDAPI_OK", True),
+            patch.object(hid_gesture, "_BACKEND_PREFERENCE", "hidapi"),
+            patch.object(hid_gesture, "_HID_API_STYLE", "hidapi"),
+            patch.object(
+                hid_gesture,
+                "_hid",
+                SimpleNamespace(device=SlowMouseReceiver),
+                create=True,
+            ),
+            patch("core.hid_gesture._load_last_device_cache", return_value=None),
+            patch("builtins.print"),
+        ):
+            connected = listener._try_connect()
+
+        self.assertFalse(connected, f"settled on devIdx 0x{listener._dev_idx:02X}")
 
     def test_candidates_sorted_direct_devices_before_receivers(self):
         """Bluetooth devices should be tried before USB receivers."""
