@@ -1698,8 +1698,11 @@ class Engine:
             # Update in place instead of rebinding self.cfg: Backend shares
             # this exact dict object, and rebinding it would silently fork
             # the two config holders again (stale-copy overwrite bug).
-            self.cfg.clear()
+            # Never clear() first: other threads save self.cfg unlocked and
+            # could persist an empty dict, wiping the user's config.
             self.cfg.update(fresh_cfg)
+            for stale_key in [k for k in self.cfg if k not in fresh_cfg]:
+                del self.cfg[stale_key]
             self._current_profile = self.cfg.get("active_profile", "default")
             self.hook.reset_bindings()
             self._setup_hooks()

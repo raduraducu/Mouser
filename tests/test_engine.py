@@ -316,6 +316,42 @@ class EngineReloadMappingsConfigIdentityTests(unittest.TestCase):
         self.assertIs(engine.cfg, original_cfg)
         self.assertEqual(engine.cfg["settings"]["language"], "zh")
 
+    def test_reload_mappings_never_leaves_shared_config_empty(self):
+        # Other threads save the shared dict without the engine lock; an
+        # empty intermediate state would be persisted as the user's config.
+        from core.engine import Engine
+
+        class _SizeRecordingDict(dict):
+            sizes = []
+
+            def clear(self):
+                super().clear()
+                self.sizes.append(len(self))
+
+            def update(self, *args, **kwargs):
+                super().update(*args, **kwargs)
+                self.sizes.append(len(self))
+
+            def __delitem__(self, key):
+                super().__delitem__(key)
+                self.sizes.append(len(self))
+
+        cfg = _SizeRecordingDict(copy.deepcopy(DEFAULT_CONFIG))
+        cfg["stale_key"] = 1
+        with (
+            patch("core.engine.MouseHook", _FakeMouseHook),
+            patch("core.engine.AppDetector", _FakeAppDetector),
+            patch("core.engine.load_config", return_value=cfg),
+        ):
+            engine = Engine()
+
+        with patch("core.engine.load_config", return_value=copy.deepcopy(DEFAULT_CONFIG)):
+            engine.reload_mappings()
+
+        self.assertTrue(cfg.sizes)
+        self.assertNotIn(0, cfg.sizes)
+        self.assertNotIn("stale_key", engine.cfg)
+
 
 class EngineDesktopCycleTests(unittest.TestCase):
     def _make_engine(self):

@@ -419,11 +419,15 @@ def _restore_macos_plist(
     plist_path: str,
     previous_plist: bytes | None,
     domain: str,
+    running_as_agent: bool = False,
 ) -> None:
     if previous_plist is None:
         _remove_file_if_present(plist_path)
         return
     _atomic_write_file(plist_path, previous_plist)
+    if running_as_agent:
+        # The job was never booted out, so a bootstrap would fail.
+        return
     result = _launchctl_run(["launchctl", "bootstrap", domain, plist_path])
     if result.returncode != 0:
         raise RuntimeError(_launchctl_failure_message("restore bootstrap", result))
@@ -434,9 +438,10 @@ def _restore_macos_plist_then_raise(
     previous_plist: bytes | None,
     domain: str,
     exc: Exception,
+    running_as_agent: bool = False,
 ) -> None:
     try:
-        _restore_macos_plist(plist_path, previous_plist, domain)
+        _restore_macos_plist(plist_path, previous_plist, domain, running_as_agent)
     except Exception as restore_exc:
         raise RuntimeError(
             f"{exc}; additionally failed to restore the previous launch agent: {restore_exc}"
@@ -500,7 +505,9 @@ def _apply_macos(enabled: bool) -> None:
                 if result.returncode != 0:
                     raise RuntimeError(_launchctl_failure_message("bootstrap", result))
         except Exception as exc:
-            _restore_macos_plist_then_raise(plist_path, previous_plist, domain, exc)
+            _restore_macos_plist_then_raise(
+                plist_path, previous_plist, domain, exc, running_as_agent
+            )
         # When running as the agent itself, the rewritten plist is picked up
         # at the next login; re-loading the job now would terminate us.
     else:

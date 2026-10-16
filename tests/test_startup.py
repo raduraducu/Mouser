@@ -341,6 +341,40 @@ class ApplyLoginStartupMacTests(unittest.TestCase):
                 ],
             )
 
+    def test_macos_enable_restores_plist_without_bootstrap_when_agent_write_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plist = os.path.join(tmp, "io.github.tombadash.mouser.plist")
+            with open(plist, "wb") as f:
+                f.write(b"old plist")
+
+            write_calls = []
+
+            def fake_atomic_write(path, data):
+                write_calls.append((path, data))
+                if len(write_calls) == 1:
+                    raise OSError("write failed")
+                with open(path, "wb") as f:
+                    f.write(data)
+
+            with (
+                patch.object(sys, "platform", "darwin"),
+                patch("core.startup.os.getuid", return_value=501, create=True),
+                patch.object(st, "supports_login_startup", return_value=True),
+                patch.object(st, "_macos_plist_path", return_value=plist),
+                patch.object(st, "_program_arguments", return_value=["/X/Mouser"]),
+                patch.object(st, "_launchctl_run") as m_lc,
+                patch.object(st, "_atomic_write_file", side_effect=fake_atomic_write),
+                patch.dict(
+                    os.environ, {"XPC_SERVICE_NAME": st.MACOS_LAUNCH_AGENT_LABEL}
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "failed to update launch agent"):
+                    st.apply_login_startup(True)
+
+            with open(plist, "rb") as f:
+                self.assertEqual(f.read(), b"old plist")
+            m_lc.assert_not_called()
+
     def test_macos_disable_bootout_and_remove_when_plist_exists(self):
         plist = "/tmp/io.github.tombadash.mouser.plist"
         domain = "gui/501"
