@@ -209,13 +209,15 @@ class MouseHook(BaseMouseHook):
         """True when `btn` is the Actions Ring arriving as a native OS button.
 
         Gated on the connected device actually routing its primary gesture
-        through the Sense Panel, so no other mouse's button 6 is captured.
+        through the Sense Panel, and on the listener having diverted the Sense
+        Panel CID (0x01A0), so no other mouse's button 6 is captured.
         `_ui_passthrough` is excluded because the UI is then capturing raw
         input for a binding and must see the press itself.
         """
         return (
             btn == _BTN_SENSE_PANEL
             and self._gesture_via_sense_panel
+            and getattr(self._connected_device, "active_gesture_cid", None) == 0x01A0
             and not getattr(self, "_ui_passthrough", False)
         )
 
@@ -269,7 +271,11 @@ class MouseHook(BaseMouseHook):
                 # full abort, not just dropping the hold flag: `_gesture_active`
                 # gates the next press, so leaving it set kills the button
                 # outright, which is the failure this fallback exists to fix.
-                self._abort_native_gesture("tap_disabled")
+                # A raising abort must not leave the tap disabled.
+                try:
+                    self._abort_native_gesture("tap_disabled")
+                except Exception as exc:
+                    print(f"[MouseHook] native gesture abort failed: {exc}")
                 Quartz.CGEventTapEnable(self._tap, True)
                 return cg_event
 
@@ -544,9 +550,6 @@ class MouseHook(BaseMouseHook):
                     f"{'OK' if ok else 'FAILED — may need restart'}",
                     flush=True,
                 )
-            # A sleep long enough to re-enable the tap is also long enough for
-            # the mouse to have dropped its link and come back undiverted.
-            self.request_divert_refresh(reason)
             if hg and reconnect:
                 hg.force_reconnect()
 

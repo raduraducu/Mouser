@@ -267,11 +267,9 @@ class MacOSWakeRecoveryTests(unittest.TestCase):
 
         self.assertEqual(len(workers), 2)
 
-    def test_wake_asks_the_listener_to_rearm_the_divert(self):
-        # A sleep deep enough to need the tap re-enabled is also deep enough
-        # for the mouse to have dropped its link and come back undiverted.
-        # Without this the control stays dead until the app is restarted, and
-        # nothing else on the wake path re-applies the diversion.
+    def test_wake_leaves_the_divert_rearm_to_the_reconnect(self):
+        # The resume reconnect runs a full _divert(); a separate refresh on
+        # the old handle only races it.
         center, _ = self._register_observers()
 
         with (
@@ -283,23 +281,7 @@ class MacOSWakeRecoveryTests(unittest.TestCase):
         ):
             center.callbacks[self._WAKE][1](None)
 
-        self.listener.request_divert_refresh.assert_called_once()
-
-    def test_wake_rearm_survives_a_listener_that_raises(self):
-        # Runs inside a workspace notification block, which may not raise.
-        self.listener.request_divert_refresh.side_effect = RuntimeError("boom")
-        center, _ = self._register_observers()
-
-        with (
-            patch.object(
-                self.module.threading, "Thread",
-                self._capturing_thread_class([]),
-            ),
-            patch.object(self.module.time, "monotonic", return_value=100.0),
-        ):
-            center.callbacks[self._WAKE][1](None)
-
-        self.listener.request_divert_refresh.assert_called_once()
+        self.listener.request_divert_refresh.assert_not_called()
 
     def test_resume_worker_does_not_reconnect_after_stop(self):
         self.hook._running = False
@@ -1152,6 +1134,17 @@ class MacOSEventTapDisabledTests(unittest.TestCase):
         self.mock_quartz.CGEventTapEnable.assert_called_once_with(
             hook._tap, True)
 
+    def test_reenable_survives_a_raising_native_gesture_abort(self):
+        hook = self._make_hook()
+        hook._abort_native_gesture = Mock(side_effect=RuntimeError("boom"))
+
+        hook._event_tap_callback(
+            None, mouse_hook._kCGEventTapDisabledByTimeout,
+            MagicMock(name="cg_event"), None)
+
+        self.mock_quartz.CGEventTapEnable.assert_called_once_with(
+            hook._tap, True)
+
     def test_normal_event_does_not_reenable(self):
         hook = self._make_hook()
         dummy = MagicMock(name="cg_event")
@@ -1371,7 +1364,7 @@ class MacOSUndivertedSensePressTests(unittest.TestCase):
         hook._tap = MagicMock(name="tap")
         # A Logitech must look bound, or the KVM guard passes everything
         # through before the button branch is reached.
-        hook._connected_device = object()
+        hook._connected_device = SimpleNamespace(active_gesture_cid=0x01A0)
         hook._gesture_via_sense_panel = sense_panel
         hook._hid_gesture = MagicMock(name="hid_gesture")
         # Real listeners report False here; a bare MagicMock attribute is
@@ -1487,6 +1480,18 @@ class MacOSUndivertedSensePressTests(unittest.TestCase):
         self.assertTrue(hook._dispatch_queue.empty())
         hook._hid_gesture.request_divert_refresh.assert_not_called()
 
+    def test_button_six_passes_through_when_sense_panel_was_not_diverted(self):
+        # The listener fell back to another gesture CID, so button 6 is not
+        # a lapsed Actions Ring divert.
+        hook = self._hook()
+        hook._connected_device = SimpleNamespace(active_gesture_cid=0x00C3)
+
+        cg_event, result = self._press(
+            hook, mouse_hook._BTN_SENSE_PANEL, self._kCGEventOtherMouseDown)
+
+        self.assertIs(result, cg_event)
+        self.assertTrue(hook._dispatch_queue.empty())
+
     def test_button_six_passes_through_while_the_ui_captures_input(self):
         # The binding-capture UI must see the raw press itself.
         hook = self._hook()
@@ -1574,6 +1579,19 @@ class MacOSUndivertedSensePressTests(unittest.TestCase):
         event = hook._dispatch_queue.get_nowait()
         self.assertEqual(event.event_type, mouse_hook.MouseEvent.SENSE_BUTTON_UP)
         self.assertIsNone(event.raw_data)
+
+    def test_disconnect_mid_press_releases_the_native_hold(self):
+        hook = self._hook()
+        self._press(
+            hook, mouse_hook._BTN_SENSE_PANEL, self._kCGEventOtherMouseDown)
+        self._drain(hook)
+
+        hook._on_hid_disconnect()
+
+        self.assertFalse(hook._gesture_active)
+        self.assertFalse(hook._native_gesture_active)
+        self.assertEqual(
+            self._drain(hook), [mouse_hook.MouseEvent.SENSE_BUTTON_UP])
 
     def test_tap_disabled_with_no_press_in_flight_resolves_nothing(self):
         # The tap is disabled far more often than it is disabled mid-press;

@@ -508,6 +508,9 @@ class BaseMouseHook:
             self._hid_gesture = None
 
     def _on_hid_connect(self):
+        # A native hold cannot survive a link change: its release will never
+        # arrive, and left open it blocks later re-diverts and replays.
+        self._abort_native_gesture("connect")
         self._connected_device = (
             self._hid_gesture.connected_device if self._hid_gesture else None
         )
@@ -517,6 +520,7 @@ class BaseMouseHook:
         self._set_device_connected(True)
 
     def _on_hid_disconnect(self):
+        self._abort_native_gesture("disconnect")
         self._connected_device = None
         self._set_device_connected(False)
 
