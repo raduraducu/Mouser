@@ -854,7 +854,13 @@ class Backend(QObject):
 
     @Property(float, notify=settingsChanged)
     def hscrollStepMultiplier(self):
-        val = float(self._cfg.get("settings", {}).get("hscroll_step_multiplier", 1.0))
+        raw = self._cfg.get("settings", {}).get("hscroll_step_multiplier", 1.0)
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            return 1.0
+        if val != val:
+            return 1.0
         return max(0.5, min(5.0, val))
 
     @Property(bool, notify=settingsChanged)

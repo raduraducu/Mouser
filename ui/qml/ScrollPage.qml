@@ -292,12 +292,11 @@ Item {
                 }
             }
 
-            Item { width: 1; height: 16; visible: backend.smartShiftSupported && backend.deviceHasSmartShift }
+            Item { width: 1; height: 16; visible: volumeStepCard.visible }
 
             // ── Thumb Wheel Volume Step Size ──────────────────────
             Rectangle {
                 id: volumeStepCard
-                visible: backend.hidFeaturesReady
                 width: parent.width - 72
                 anchors.horizontalCenter: parent.horizontalCenter
                 height: volumeStepContent.implicitHeight + 40

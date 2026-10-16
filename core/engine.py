@@ -1018,7 +1018,9 @@ class Engine:
             # noise-gating threshold above. >=1.0 fires multiple times per
             # notch (bigger/faster steps); <1.0 spreads a single fire
             # across multiple notches (smaller/slower steps) via rep_accum.
-            state["rep_accum"] += self._hscroll_multiplier()
+            state["rep_accum"] += (
+                self._hscroll_multiplier() if action_id in _VOLUME_ACTIONS else 1.0
+            )
             reps = int(state["rep_accum"])
             state["rep_accum"] -= reps
             if reps <= 0:
@@ -1041,9 +1043,14 @@ class Engine:
         return min(abs(float(raw_value)), 1.0)
 
     def _hscroll_multiplier(self):
-        return max(0.5, min(5.0, float(
-            self.cfg.get("settings", {}).get("hscroll_step_multiplier", 1.0)
-        )))
+        raw = self.cfg.get("settings", {}).get("hscroll_step_multiplier", 1.0)
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return 1.0
+        if value != value:
+            return 1.0
+        return max(0.5, min(5.0, value))
 
     def _hscroll_threshold(self):
         return max(

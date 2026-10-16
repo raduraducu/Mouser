@@ -182,6 +182,34 @@ class EngineHorizontalScrollTests(unittest.TestCase):
 
         self.assertEqual(execute_action_mock.call_count, 2)
 
+    def test_hscroll_step_multiplier_applies_only_to_volume_actions(self):
+        engine = self._make_engine()
+        engine.cfg["settings"]["hscroll_step_multiplier"] = 5.0
+        desktop = engine._make_hscroll_handler("space_right")
+        volume = engine._make_hscroll_handler("volume_up")
+
+        with patch("core.engine.execute_action") as execute_action_mock:
+            desktop(SimpleNamespace(
+                event_type=MouseEvent.HSCROLL_RIGHT,
+                raw_data=1,
+                timestamp=1.00,
+            ))
+            self.assertEqual(execute_action_mock.call_count, 1)
+            volume(SimpleNamespace(
+                event_type=MouseEvent.HSCROLL_LEFT,
+                raw_data=1,
+                timestamp=1.00,
+            ))
+
+        self.assertEqual(execute_action_mock.call_count, 6)
+
+    def test_hscroll_step_multiplier_falls_back_on_bad_config_value(self):
+        engine = self._make_engine()
+
+        for raw in ("abc", None, float("nan")):
+            engine.cfg["settings"]["hscroll_step_multiplier"] = raw
+            self.assertEqual(engine._hscroll_multiplier(), 1.0)
+
     def test_hscroll_accumulates_fractional_mac_deltas(self):
         engine = self._make_engine()
         handler = engine._make_hscroll_handler("space_right")

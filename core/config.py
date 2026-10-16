@@ -225,7 +225,7 @@ def _default_actions_ring_slots(platform=None):
 
 
 DEFAULT_CONFIG = {
-    "version": 12,
+    "version": 11,
     "active_profile": "default",
     "profiles": {
         "default": {
@@ -730,12 +730,6 @@ def _migrate(cfg):
         settings = cfg.setdefault("settings", {})
         settings.setdefault("scroll_force", 50)
         cfg["version"] = 11
-
-    if version < 12:
-        # v11 -> v12: horizontal scroll (thumb wheel/volume) step multiplier.
-        settings = cfg.setdefault("settings", {})
-        settings.setdefault("hscroll_step_multiplier", 1.0)
-        cfg["version"] = 12
 
     cfg.setdefault("settings", {})
     cfg["settings"].setdefault("appearance_mode", "system")
