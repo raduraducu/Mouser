@@ -290,6 +290,7 @@ pyinstaller Mouser-linux.spec --noconfirm
 
 ## 已知限制
 
+- **Logi Bolt 首次配对** — Mouser 不提供鼠标与接收器的配对功能。如果 MX Master 3S 尚未与 Logi Bolt 接收器配对，请先使用 [Logi Web Connect](https://logiwebconnect.com/) 完成配对，再使用 Mouser 配置鼠标。已配对的设备无需重新配对。
 - **每设备映射尚未完全分离** — 布局覆盖按设备保存，但 Profile 中的按键映射仍是全局共享的。
 - **与 Logitech Options+ 冲突** — 两者会争夺 HID++ 访问权，运行 Mouser 前请先退出 Options+。
 - **滚动反转** 在 Windows 上使用合并后的事件注入，避免 LL hook 死锁；在主流应用中表现稳定，但在某些游戏或低级驱动中可能不正常。

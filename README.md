@@ -312,6 +312,7 @@ For project layout, the architecture diagram, the HID++ gesture detector, the En
 
 ## Limitations
 
+- **Initial Logi Bolt pairing** — Mouser does not pair a mouse with a receiver. If your MX Master 3S is not yet paired with its Logi Bolt receiver, use [Logi Web Connect](https://logiwebconnect.com/) to complete pairing first, then use Mouser to configure the mouse. Already-paired devices do not need to be paired again.
 - **Per-device mappings aren't fully separated yet** — layout overrides are stored per detected device, but profile mappings are still global.
 - **Conflicts with Logitech Options+** — both apps fight over HID++ access. Quit Options+ before running Mouser.
 - **Scroll inversion** uses coalesced post-injection on Windows to avoid LL-hook deadlocks; it's stable in mainstream apps but may misbehave in some games or low-level drivers.
