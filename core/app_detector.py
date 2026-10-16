@@ -369,6 +369,8 @@ elif sys.platform == "darwin":
             self._notification_center = None
             self._observer_token = None
             self._notification_handler = None
+            self._wake_observer_tokens = []
+            self._wake_handler = None
 
         def start(self):
             if self._observer_token is not None:
@@ -396,9 +398,9 @@ elif sys.platform == "darwin":
                             app = user_info.get(NSWorkspaceApplicationKey)
                         if app is not None:
                             observer._on_change(_macos_running_app_identities(app))
-                except Exception:
+                except Exception as exc:
                     # Do not let Python exceptions escape through an ObjC block.
-                    pass
+                    print(f"[AppDetector] activation observer error: {exc!r}")
 
             token = notification_center.addObserverForName_object_queue_usingBlock_(
                 NSWorkspaceDidActivateApplicationNotification,
@@ -414,9 +416,40 @@ elif sys.platform == "darwin":
             # PyObjC blocks must remain strongly referenced for the observer lifetime.
             self._notification_handler = _handle_activation
 
+            # An activation can go unannounced across sleep or a user switch.
+            # Re-read the frontmost app when the session comes back.
+            def _handle_wake(notification):
+                observer = observer_ref()
+                if observer is None:
+                    return
+                try:
+                    observer._on_change(get_foreground_app_identity())
+                except Exception as exc:
+                    print(f"[AppDetector] wake observer error: {exc!r}")
+
+            self._wake_handler = _handle_wake
+            for name in (
+                "NSWorkspaceDidWakeNotification",
+                "NSWorkspaceScreensDidWakeNotification",
+                "NSWorkspaceSessionDidBecomeActiveNotification",
+            ):
+                wake_token = notification_center.addObserverForName_object_queue_usingBlock_(
+                    name,
+                    None,
+                    None,
+                    _handle_wake,
+                )
+                if wake_token is not None:
+                    self._wake_observer_tokens.append(wake_token)
+
         def stop(self):
-            if self._observer_token is not None and self._notification_center is not None:
-                self._notification_center.removeObserver_(self._observer_token)
+            if self._notification_center is not None:
+                if self._observer_token is not None:
+                    self._notification_center.removeObserver_(self._observer_token)
+                for wake_token in self._wake_observer_tokens:
+                    self._notification_center.removeObserver_(wake_token)
+            self._wake_observer_tokens = []
+            self._wake_handler = None
             self._observer_token = None
             self._notification_center = None
             self._notification_handler = None
@@ -497,6 +530,12 @@ class AppDetector:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._macos_observer = None
+        # The NSWorkspace observer runs on the main thread, which also runs
+        # the CGEventTap. It only records the latest identity here; a worker
+        # thread runs the profile switch.
+        self._wake = threading.Event()
+        self._pending: tuple[str, ...] | None = None
+        self._worker: threading.Thread | None = None
 
     def start(self):
         if self._macos_observer is not None:
@@ -508,7 +547,7 @@ class AppDetector:
         if _IS_MACOS:
             observer = None
             try:
-                observer = _MacOSWorkspaceObserver(self._handle_app_change)
+                observer = _MacOSWorkspaceObserver(self._notify)
                 observer.start()
             except Exception as exc:
                 if observer is not None:
@@ -519,10 +558,13 @@ class AppDetector:
                 )
             else:
                 self._macos_observer = observer
-                try:
-                    self._handle_app_change(get_foreground_app_identity())
-                except Exception:
-                    pass
+                self._worker = threading.Thread(
+                    target=self._drain_notifications,
+                    daemon=True,
+                    name="AppDetectorWorker",
+                )
+                self._worker.start()
+                self._notify(get_foreground_app_identity())
                 return
 
         self._thread = threading.Thread(target=self._poll, daemon=True, name="AppDetector")
@@ -530,12 +572,34 @@ class AppDetector:
 
     def stop(self):
         self._stop.set()
+        self._wake.set()
         if self._macos_observer is not None:
             self._macos_observer.stop()
             self._macos_observer = None
+        if self._worker:
+            self._worker.join(timeout=2)
+            self._worker = None
         if self._thread:
             self._thread.join(timeout=2)
             self._thread = None
+
+    def _notify(self, app_identity):
+        # Latest value wins: a burst of activations runs one profile switch.
+        self._pending = app_identity
+        self._wake.set()
+
+    def _drain_notifications(self):
+        while not self._stop.is_set():
+            self._wake.wait()
+            self._wake.clear()
+            if self._stop.is_set():
+                break
+            app_identity, self._pending = self._pending, None
+            try:
+                with _objc.autorelease_pool():
+                    self._handle_app_change(app_identity)
+            except Exception as exc:
+                print(f"[AppDetector] activation handler error: {exc!r}")
 
     def _handle_app_change(self, app_identity):
         if app_identity and app_identity != self._last_app_identity:

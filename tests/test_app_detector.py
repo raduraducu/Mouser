@@ -2,8 +2,10 @@ from contextlib import nullcontext
 import importlib
 import os
 import plistlib
+import queue
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from unittest.mock import Mock, patch
@@ -179,16 +181,23 @@ class AppDetectorMacOSObserverTests(unittest.TestCase):
 
     class FakeNotificationCenter:
         def __init__(self):
-            self.handler = None
-            self.token = object()
+            self.handlers = {}
+            self.registrations = []
+            self.tokens = []
             self.removed = []
+
+        @property
+        def handler(self):
+            return self.handlers["did-activate"]
 
         def addObserverForName_object_queue_usingBlock_(
             self, name, observed_object, queue, handler
         ):
-            self.registration = (name, observed_object, queue)
-            self.handler = handler
-            return self.token
+            self.registrations.append((name, observed_object, queue))
+            self.handlers[name] = handler
+            token = object()
+            self.tokens.append(token)
+            return token
 
         def removeObserver_(self, token):
             self.removed.append(token)
@@ -225,42 +234,117 @@ class AppDetectorMacOSObserverTests(unittest.TestCase):
         self.addCleanup(module_patch.stop)
         self.module = _load_app_detector("darwin")
 
+    def _start_detector(self, on_change):
+        """Start a detector and return a queue of identities its worker handled."""
+        detector = self.module.AppDetector(on_change)
+        handled = queue.Queue()
+        handle_app_change = detector._handle_app_change
+
+        def _recording_handle_app_change(app_identity):
+            try:
+                handle_app_change(app_identity)
+            finally:
+                handled.put(app_identity)
+
+        detector._handle_app_change = _recording_handle_app_change
+        detector.start()
+        self.addCleanup(detector.stop)
+        return detector, handled
+
+    def _app(self, name):
+        return self.FakeRunningApplication(
+            f"com.example.{name}", f"/Applications/{name}.app", name
+        )
+
     def test_uses_workspace_notifications_and_deduplicates_app_changes(self):
         on_change = Mock()
-        detector = self.module.AppDetector(on_change)
+        detector, handled = self._start_detector(on_change)
+        handled.get(timeout=2)
 
-        detector.start()
-
-        self.assertEqual(self.center.registration, ("did-activate", None, None))
+        self.assertEqual(
+            self.center.registrations,
+            [
+                ("did-activate", None, None),
+                ("NSWorkspaceDidWakeNotification", None, None),
+                ("NSWorkspaceScreensDidWakeNotification", None, None),
+                ("NSWorkspaceSessionDidBecomeActiveNotification", None, None),
+            ],
+        )
         on_change.assert_called_once()
         self.assertEqual(on_change.call_args.args[0][0], "com.example.Initial")
         self.assertIsNone(detector._thread)
 
         same_app = self.FakeNotification("application", self.initial_app)
         self.center.handler(same_app)
+        handled.get(timeout=2)
         on_change.assert_called_once()
 
-        next_app = self.FakeRunningApplication(
-            "com.example.Next", "/Applications/Next.app", "Next"
-        )
-        self.center.handler(self.FakeNotification("application", next_app))
+        self.center.handler(self.FakeNotification("application", self._app("Next")))
+        handled.get(timeout=2)
         self.assertEqual(on_change.call_count, 2)
         self.assertEqual(on_change.call_args.args[0][0], "com.example.Next")
 
+    def test_activation_runs_profile_switch_off_the_observer_thread(self):
+        called = threading.Event()
+        threads = []
+
+        def on_change(_app_identity):
+            threads.append(threading.current_thread())
+            called.set()
+
+        detector, handled = self._start_detector(on_change)
+        handled.get(timeout=2)
+        called.clear()
+        threads.clear()
+
+        self.center.handler(self.FakeNotification("application", self._app("Next")))
+
+        self.assertTrue(called.wait(timeout=2))
+        self.assertIsNot(threads[0], threading.current_thread())
+        self.assertIs(threads[0], detector._worker)
+
+    def test_latest_activation_wins_when_worker_is_busy(self):
+        busy = threading.Event()
+        gate = threading.Event()
+        seen = []
+
+        def on_change(app_identity):
+            seen.append(app_identity[0])
+            if app_identity[0] == "com.example.Busy":
+                busy.set()
+                gate.wait(timeout=2)
+
+        detector, handled = self._start_detector(on_change)
+        handled.get(timeout=2)
+
+        self.center.handler(self.FakeNotification("application", self._app("Busy")))
+        self.assertTrue(busy.wait(timeout=2))
+        self.center.handler(self.FakeNotification("application", self._app("Skipped")))
+        self.center.handler(self.FakeNotification("application", self._app("Latest")))
+        gate.set()
+        handled.get(timeout=2)
+        handled.get(timeout=2)
+
+        self.assertEqual(
+            seen,
+            ["com.example.Initial", "com.example.Busy", "com.example.Latest"],
+        )
+
     def test_stop_unregisters_workspace_observer(self):
-        detector = self.module.AppDetector(Mock())
-        detector.start()
+        detector, _handled = self._start_detector(Mock())
+        worker = detector._worker
 
         detector.stop()
 
-        self.assertEqual(self.center.removed, [self.center.token])
+        self.assertEqual(self.center.removed, self.center.tokens)
         self.assertIsNone(detector._macos_observer)
+        self.assertFalse(worker.is_alive())
+        self.assertIsNone(detector._worker)
 
     def test_initial_callback_failure_keeps_workspace_observer(self):
         on_change = Mock(side_effect=RuntimeError("profile switch failed"))
-        detector = self.module.AppDetector(on_change)
-
-        detector.start()
+        detector, handled = self._start_detector(on_change)
+        handled.get(timeout=2)
 
         self.assertIsNotNone(detector._macos_observer)
         self.assertIsNone(detector._thread)
