@@ -864,7 +864,7 @@ class Backend(QObject):
 
     @Property(bool, notify=settingsChanged)
     def checkForUpdates(self):
-        return bool(self._cfg.get("settings", {}).get("check_for_updates", True))
+        return bool(self._cfg.get("settings", {}).get("check_for_updates", False))
 
     @Property(str, notify=settingsChanged)
     def screenshotDirectory(self):
@@ -1192,15 +1192,11 @@ class Backend(QObject):
         return screenshot_file_paths(count)
 
     def _configureUpdateChecks(self):
-        if self.checkForUpdates:
-            if not self._update_timer.isActive():
-                self._update_timer.start()
-            QTimer.singleShot(3000, lambda: self._startUpdateCheck(manual=False))
-        else:
-            self._update_timer.stop()
+        # Fork: no automatic update checks; only the manual button contacts GitHub.
+        self._update_timer.stop()
 
     def _startUpdateCheck(self, manual=False):
-        if not manual and not self.checkForUpdates:
+        if not manual:
             return
         if self._update_check_in_progress:
             if manual:

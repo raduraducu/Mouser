@@ -165,6 +165,17 @@ class BackendDeviceLayoutTests(unittest.TestCase):
         thread_cls.assert_not_called()
         self.assertFalse(backend._update_check_in_progress)
 
+    def test_automatic_update_check_never_runs_even_when_enabled(self):
+        cfg = copy.deepcopy(DEFAULT_CONFIG)
+        cfg.setdefault("settings", {})["check_for_updates"] = True
+        backend = self._make_backend(cfg=cfg)
+
+        with patch("ui.backend.threading.Thread") as thread_cls:
+            backend._startUpdateCheck(manual=False)
+
+        thread_cls.assert_not_called()
+        self.assertFalse(backend._update_timer.isActive())
+
     def test_manual_update_check_triggers_immediate_fetch(self):
         backend = self._make_backend()
 
