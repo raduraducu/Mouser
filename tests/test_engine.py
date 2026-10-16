@@ -500,6 +500,39 @@ class EngineReplayPhaseOneTests(unittest.TestCase):
         self.assertEqual(len(threads), 1)
         self.assertTrue(engine._replay_inflight)
 
+    def test_replay_writes_values_changed_during_settle_wait(self):
+        engine = self._make_engine()
+        engine.hook._hid_gesture = self._make_hid(
+            connected_device=SimpleNamespace(name="MX Master 3S")
+        )
+        engine.cfg["settings"]["dpi"] = 1000
+        engine.cfg["settings"]["smart_shift_mode"] = "ratchet"
+
+        def user_changes_settings(_seconds):
+            engine.cfg["settings"]["dpi"] = 2400
+            engine.cfg["settings"]["smart_shift_mode"] = "freespin"
+
+        with patch("core.engine.time.sleep", side_effect=user_changes_settings):
+            engine._run_saved_settings_replay()
+
+        hg = engine.hook._hid_gesture
+        hg.set_dpi.assert_called_once_with(2400)
+        self.assertEqual(hg.set_smart_shift.call_args[0][0], "freespin")
+
+    def test_raising_replay_clears_inflight_flag(self):
+        engine = self._make_engine()
+        threads = []
+        with (
+            patch("core.engine.threading.Thread", side_effect=self._thread_factory(threads)),
+            patch.object(
+                engine, "_run_saved_settings_replay", side_effect=RuntimeError("boom")
+            ),
+        ):
+            engine._request_saved_settings_replay()
+            threads[0].run_target()
+
+        self.assertFalse(engine._replay_inflight)
+
     def test_evdev_only_connected_true_does_not_request_replay_worker(self):
         engine = self._make_engine()
         engine.hook.connected_device = SimpleNamespace(name="MX Master 3S", source="evdev")

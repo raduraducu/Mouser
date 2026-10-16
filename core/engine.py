@@ -767,8 +767,10 @@ class Engine:
         ))
         target_active = bool(capable and not kill_switch_off)
         hg = self.hook._hid_gesture
+        # force only bypasses the cache for a write we want; with the kill
+        # switch off (or no capable device) it must not touch the firmware.
         if (
-            not force
+            not (force and target_active)
             and target_active == self._wheel_divert_active_local
             and target_active == bool(getattr(self.hook, "wheel_native_invert_active", False))
             and (not target_active or self._last_native_invert_target == (invert_v, invert_h))
@@ -1292,6 +1294,15 @@ class Engine:
         if hg is None or getattr(hg, "connected_device", None) is None:
             return False
 
+        # Re-read after the wait so a change the user made meanwhile is not
+        # reverted to the values captured before it.
+        saved_dpi = self.cfg.get("settings", {}).get("dpi")
+        saved_ss_state = self._saved_smart_shift_state()
+        saved_ss = saved_ss_state["mode"]
+        ss_enabled = saved_ss_state["enabled"]
+        ss_threshold = saved_ss_state["threshold"]
+        ss_scroll_force = saved_ss_state["scroll_force"]
+
         if saved_dpi is not None:
             if not hasattr(hg, "set_dpi"):
                 replay_ok = False
@@ -1357,7 +1368,14 @@ class Engine:
         while True:
             with self._replay_lock:
                 self._replay_pending_rerun = False
-            replay_ok = self._run_saved_settings_replay()
+            # A raising replay must still clear _replay_inflight below, or
+            # every later replay and the battery poll's Smart Shift read stay
+            # disabled for the life of the process.
+            try:
+                replay_ok = self._run_saved_settings_replay()
+            except Exception as exc:
+                print(f"[Engine] saved-settings replay failed: {exc}")
+                replay_ok = False
             should_emit_failure = False
             with self._replay_lock:
                 if self._replay_pending_rerun:

@@ -2993,16 +2993,20 @@ class HidGestureListener:
         msg = _parse(raw)
         if msg is None:
             return
-        _, feat, func, _sw, params = msg
+        dev, feat, func, _sw, params = msg
 
         # 0x1D4B statusBroadcastEvent: the device re-linked and is asking to
         # be reconfigured. `_sw != MY_SW` keeps our own polled responses out,
-        # matching the battery broadcast below.
+        # matching the battery broadcast below. The device-index check keeps
+        # another device on the same receiver (a keyboard) from replaying
+        # this mouse's settings; a direct device may report 0x00 for 0xFF.
         if (
             self._wireless_status_idx is not None
             and feat == self._wireless_status_idx
             and func == _WDS_EVENT_FN
             and _sw != MY_SW
+            and (dev == self._dev_idx
+                 or (self._dev_idx == BT_DEV_IDX and dev == 0x00))
         ):
             self._handle_wireless_status_event(params)
             return

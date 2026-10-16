@@ -983,6 +983,18 @@ class DeviceWakeNotificationTests(unittest.TestCase):
 
         self.assertEqual(woke, [])
 
+    def test_other_device_on_same_receiver_is_not_a_wake(self):
+        # A keyboard paired to the same Bolt receiver sends its own 0x1D4B.
+        listener = self._listener()
+        woke = []
+        listener._on_wake = lambda: woke.append(True)
+        event = self._event(0x01, 0x01, 0x01)
+        event[1] = 0x01
+
+        self._deliver_event(listener, event)
+
+        self.assertEqual(woke, [])
+
     def test_no_wake_before_the_feature_is_resolved(self):
         # Until connect resolves 0x1D4B, index 4 means nothing -- another
         # feature could legitimately be sitting there.
@@ -1122,6 +1134,16 @@ class EngineWakeReplayTests(_EngineNativeInvertMixin, unittest.TestCase):
         engine._on_device_wake()
         _join_wheel_invert_workers()
         self.assertEqual(hg.requests, [(False, True)])
+
+    def test_wake_with_kill_switch_off_skips_firmware_invert(self):
+        engine = self._make_engine(wheel_divert="off", invert_v=True)
+        engine._apply_wheel_invert_setting()
+        hg = engine.hook._hid_gesture
+        self.assertEqual(hg.requests, [])
+
+        engine._on_device_wake()
+        _join_wheel_invert_workers()
+        self.assertEqual(hg.requests, [])
 
     def test_hook_wake_callback_is_wired_to_engine(self):
         engine = self._make_engine(invert_h=True)
