@@ -731,6 +731,17 @@ if _MAC_NATIVE_OK:
 
         @_pooled
         def close(self):
+            # Unregister before dropping the thunk so IOKit cannot call a
+            # freed closure if the device goes away mid-close.
+            if self._device and self._removal_callback:
+                try:
+                    _iokit.IOHIDDeviceRegisterRemovalCallback(
+                        self._device,
+                        _IOHID_CALLBACK(),
+                        None,
+                    )
+                except Exception:
+                    pass
             if self._device and self._run_loop:
                 try:
                     _iokit.IOHIDDeviceUnscheduleFromRunLoop(

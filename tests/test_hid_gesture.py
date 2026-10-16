@@ -1550,6 +1550,26 @@ class MacNativeRemovalTests(unittest.TestCase):
         with self.assertRaises(OSError):
             dev.read(64, 0)
 
+    def test_close_unregisters_removal_callback_before_unscheduling(self):
+        dev = hid_gesture._MacNativeHidDevice(0xB042)
+        dev._device = 0x1234
+        dev._run_loop = 0x5678
+        dev._removal_callback = Mock()
+        iokit = Mock()
+
+        with patch.object(hid_gesture, "_iokit", iokit), \
+                patch.object(hid_gesture, "_cf", Mock()):
+            dev.close()
+
+        names = [c[0] for c in iokit.method_calls]
+        self.assertIn("IOHIDDeviceRegisterRemovalCallback", names)
+        self.assertLess(
+            names.index("IOHIDDeviceRegisterRemovalCallback"),
+            names.index("IOHIDDeviceUnscheduleFromRunLoop"),
+        )
+        callback = iokit.IOHIDDeviceRegisterRemovalCallback.call_args[0][1]
+        self.assertFalse(callback)
+
 
 class DivertRefreshTests(unittest.TestCase):
     """A Logitech mouse that re-establishes its link comes back undiverted,
