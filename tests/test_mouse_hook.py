@@ -1335,6 +1335,42 @@ class MacOSPassthroughWhenNoDeviceTests(unittest.TestCase):
 
 
 @unittest.skipUnless(sys.platform == "darwin", "macOS-only tests")
+class MacOSTapReturnBoxTests(unittest.TestCase):
+    """PyObjC never releases the event-tap callback's return value, so the
+    tap entry returns one shared box instead of each event (leak fix)."""
+
+    def test_entry_returns_shared_box_wrapping_the_event(self):
+        hook = mouse_hook.MouseHook()
+        first, second = object(), object()
+
+        with patch.object(hook, "_event_tap_callback", side_effect=[first, second]):
+            box1 = hook._tap_callback_entry(None, 22, first, None)
+            self.assertIs(box1.__pyobjc_object__, first)
+            box2 = hook._tap_callback_entry(None, 22, second, None)
+
+        self.assertIs(box1, box2)
+        self.assertIs(box2.__pyobjc_object__, second)
+
+    def test_entry_returns_none_for_suppressed_event(self):
+        hook = mouse_hook.MouseHook()
+
+        with patch.object(hook, "_event_tap_callback", return_value=None):
+            self.assertIsNone(hook._tap_callback_entry(None, 25, object(), None))
+
+    def test_pyobjc_unwraps_the_box_into_the_event(self):
+        try:
+            import Quartz
+        except ImportError:
+            self.skipTest("PyObjC Quartz not available")
+        event = Quartz.CGEventCreateScrollWheelEvent(
+            None, Quartz.kCGScrollEventUnitLine, 1, 1)
+        box = mouse_hook._TapReturnBox()
+        box.__pyobjc_object__ = event
+
+        self.assertEqual(Quartz.CGEventGetType(box), Quartz.kCGEventScrollWheel)
+
+
+@unittest.skipUnless(sys.platform == "darwin", "macOS-only tests")
 class MacOSUndivertedSensePressTests(unittest.TestCase):
     """The Actions Ring only ever reaches the CGEventTap as a native button
     when its HID++ divert has lapsed -- a diverted control never reaches the
